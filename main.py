@@ -76,6 +76,7 @@ async def txt_handler(client: Client, m: Message):
         "┣⪼07. Send /id - Know chat/group/channel ID.\n┣\n"
         "┣⪼08. Send /info - Your information.\n┣\n"
         "┣⪼09. Send /stop - Stop the Running Task. 🚫\n┣\n"
+        "┣⪼10. Send /recordm3u8 - To record an M3U8 live stream.\n┣\n"
         "┣⪼🔗  Direct Send Link For Extract (with https://)\n┣\n"
         "**If you have any questions, feel free to ask! 💬**"
         )
@@ -173,6 +174,104 @@ async def start_command(bot: Client, message: Message):
         caption=caption,
         reply_markup=keyboard
     )
+
+
+@bot.on_message(filters.command(["recordm3u8"]))
+async def record_m3u8_command(client: Client, message: Message):
+    await message.reply_text("Please send me the M3U8 link you want to record.")
+    try:
+        input_message: Message = await client.listen(message.chat.id, timeout=300) # 5 minutes timeout
+    except TimeoutError:
+        await message.reply_text("You didn't send a link within 5 minutes. Please try the /recordm3u8 command again.")
+        return
+
+    if input_message.text:
+        m3u8_link = input_message.text.strip()
+        if (m3u8_link.startswith("http://") or m3u8_link.startswith("https://")) and ".m3u8" in m3u8_link:
+            await input_message.reply_text("Valid M3U8 link received. Please enter the recording duration in minutes (e.g., 10 for 10 minutes).")
+            try:
+                duration_message: Message = await client.listen(input_message.chat.id, timeout=300) # 5 minutes timeout
+            except TimeoutError:
+                await input_message.reply_text("You didn't send a duration within 5 minutes. Please try the /recordm3u8 command again.")
+                return
+
+            if duration_message.text:
+                try:
+                    duration_minutes = int(duration_message.text.strip())
+                    if duration_minutes > 0:
+                        status_message = await duration_message.reply_text("Starting recording...")
+
+                        os.makedirs("downloads", exist_ok=True)
+                        filename = f"downloads/recording_{message.chat.id}_{int(time.time())}.mp4"
+                        duration_seconds = duration_minutes * 60
+
+                        cmd = f'yt-dlp --quiet -o "{filename}" "{m3u8_link}"'
+
+                        process = await asyncio.create_subprocess_shell(
+                            cmd,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
+
+                        await status_message.edit_text(f"Recording in progress for {duration_minutes} minutes... The file will be sent once complete.")
+
+                        try:
+                            # Wait for the specified duration
+                            await asyncio.wait_for(process.wait(), timeout=duration_seconds)
+                        except asyncio.TimeoutError:
+                            # If timeout occurs, the process is still running (likely a live stream)
+                            if process.returncode is None: # Check if process is still running
+                                process.terminate()
+                                await process.wait() # Ensure termination is complete
+                            await status_message.edit_text("Recording finished (duration reached). Preparing to send the file...")
+                        else:
+                            # If process finished before timeout (e.g. VOD or short live stream)
+                            await status_message.edit_text("Recording finished (stream ended or was shorter than duration). Preparing to send the file...")
+
+                        # stderr_output = await process.stderr.read() # Read stderr after process completion
+                        # stdout_output = await process.stdout.read() # Read stdout
+
+                        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                            await status_message.edit_text("Preparing to upload your recording...")
+                            caption = f"M3U8 Recording Complete!\nLink: {m3u8_link}\nRequested Duration: {duration_minutes} minutes"
+                            video_name_for_telegram = os.path.basename(filename)
+                            try:
+                                await helper.send_vid(client, message, caption, filename, "no", video_name_for_telegram, status_message)
+                                # Assuming helper.send_vid deletes status_message or replaces it.
+                                # If not, an explicit await status_message.delete() might be needed here.
+                            except Exception as e:
+                                logging.error(f"Failed to upload M3U8 recording: {e}")
+                                try:
+                                    await status_message.edit_text(f"Failed to upload the recording: {str(e)[:200]}. Please try again later.")
+                                except Exception as e_edit:
+                                    logging.error(f"Failed to edit status message for upload error: {e_edit}")
+                                    await message.reply_text(f"Failed to upload the recording: {str(e)[:200]}. Please try again later. The status message could not be updated.")
+                            finally:
+                                if os.path.exists(filename):
+                                    os.remove(filename)
+                        else:
+                            stderr_output = await process.stderr.read()
+                            error_message = stderr_output.decode().strip()
+                            if not error_message: # if stderr is empty, try stdout
+                                stdout_output = await process.stdout.read()
+                                error_message = stdout_output.decode().strip()
+
+                            await status_message.edit_text(f"Recording failed. File not found or empty. Error: {error_message[:1000]}")
+                            return
+                    else:
+                        await duration_message.reply_text("Invalid duration. Duration must be a positive number. Please try the /recordm3u8 command again.")
+                        return
+                except ValueError:
+                    await duration_message.reply_text("Invalid duration format. Please enter a number for minutes. Please try the /recordm3u8 command again.")
+                    return
+            else:
+                await input_message.reply_text("No duration received. Please try the /recordm3u8 command again and send a valid duration.")
+                return
+        else:
+            await input_message.reply_text("That doesn't look like a valid M3U8 link. It should start with http/https and contain '.m3u8'. Please try the /recordm3u8 command again.")
+            return # Return if M3U8 link is invalid
+    else:
+        await message.reply_text("No link received. Please try the /recordm3u8 command again and send a valid M3U8 link.")
 @bot.on_message(filters.command(["stop"]) )
 async def restart_handler(_, m):
     await m.reply_text("**ˢᵗᵒᵖᵖᵉᵈ ᵇᵃᵇʸ**", True)
